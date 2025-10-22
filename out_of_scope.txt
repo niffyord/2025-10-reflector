@@ -1,0 +1,7 @@
+./beam-contract/src/tests.rs
+./oracle/src/tests/mod.rs
+./oracle/src/tests/util_tests.rs
+./pulse-contract/src/tests/contract_admin_tests.rs
+./pulse-contract/src/tests/contract_interface_tests.rs
+./pulse-contract/src/tests/mod.rs
+./pulse-contract/src/tests/setup_tests.rs
