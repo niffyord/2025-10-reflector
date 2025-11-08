@@ -25,3 +25,29 @@ Objective 3 of the published threat model requires consumers to keep accessing f
 3. **Pre-flight checks:** Before entering the loop, assert that `update_delta * asset_count` is below a conservative threshold based on observed budget usage. Revert early with a descriptive error so automation can trigger a safe recovery procedure.
 
 By fixing the padding algorithm, the protocol can meet its documented objective of remaining available after temporary outages while still preserving per-period history granularity.
+
+## Finding: Zero-price updates disappear from history and events
+
+### Summary
+- **Finding:** The oracle treats a price of zero as "no update," so zero-priced snapshots never set the history mask or appear in emitted events.
+- **Impact:** When an asset legitimately devalues to zero (or an admin attempts to freeze it at zero), downstream consumers keep seeing the last non-zero price or `None`, violating the "price data correctness" objective of the threat model and enabling mispricing.
+
+### Detailed Walkthrough
+1. History tracking only marks periods that contain strictly positive prices. `mapping::update_history_mask` shifts the bitmask each tick and sets the new bit only when `price > 0`.【F:oracle/src/mapping.rs†L7-L40】
+2. Read paths trust that mask. `retrieve_asset_price_data` first calls `has_price`, and if the mask bit is unset it returns `None` even if storage already holds the zero-valued snapshot.【F:oracle/src/prices.rs†L31-L58】【F:oracle/src/prices.rs†L140-L143】
+3. As a result, `lastprice` (and Beam’s paid endpoints built on it) drop the newest record: after a zero update the function resolves the latest timestamp but the mask check fails, so the call returns `None`. Batch reads call `load_prices`, which silently skips the zero entry and falls back to older, positive prices when the caller requests more than one record.【F:oracle/src/price_oracle.rs†L168-L205】【F:oracle/src/prices.rs†L200-L235】
+4. Even the audit trail disappears: `publish_update_event` iterates over the update vector and `continue`s whenever `price == 0`, so indexers never see that the feed was reset to zero.【F:oracle/src/events.rs†L12-L41】
+
+### Why This Matters
+- **Integrity failure:** Threat-model objective #2 requires masks and events to encode exactly which assets changed. Treating zero as "no change" breaks that contract and lets stale, non-zero data masquerade as fresh.【F:threatmodel.md†L12-L33】
+- **Exploitable mispricing:** Honest operators attempting to reflect a crash to zero, or freeze trading on toxic collateral, instead leave integrators with the last positive quote. Protocols that backfill from "most recent non-`None`" values will keep accepting worthless assets at inflated prices.
+- **Invisible state:** Because neither the history mask nor events acknowledge the zero update, monitoring cannot distinguish "asset went to zero" from "oracles stopped updating," delaying mitigation.
+
+### Suggested Mitigations
+1. **Record zero updates explicitly:** Set the history bit regardless of sign and store a separate sentinel if "unset" must remain representable.
+2. **Emit full events:** Include zero prices in `publish_update_event` so off-chain indexers learn about freezes and devaluations.
+3. **Clarify API semantics:** If zero is supposed to mean "asset disabled," document it and add explicit status flags so consumers do not misinterpret stale positives as live data.
+
+## Audit Status
+- High-severity Beam monetization bugs remain tracked in the submission bundle, including the missing admin gate on `set_invocation_costs_config` and the two fee-accounting flaws.【F:audits/submission-report.md†L1-L199】
+- The newly documented zero-price masking gap closes the last threat-model deviation identified during the review, so all scoped surfaces now have explicit findings or QA notes.
